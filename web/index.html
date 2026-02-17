@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ryoiki-Tenkai — 영역전개 인식기</title>
+  <style>
+    /* 전체 화면을 덮는 검은 배경 */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #000;
+      color: #fff;
+      font-family: 'Noto Sans KR', sans-serif;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    /* 영상 레이어 컨테이너 */
+    #app {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* Layer 0: 웹캠 영상 */
+    #video {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1); /* 거울 모드 */
+    }
+
+    /* Layer 1 & 2: 효과 캔버스 (HandTracker 스켈레톤 + 영역전개 효과) */
+    #canvas-skeleton,
+    #canvas-effect {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none; /* 클릭 이벤트 투과 */
+    }
+
+    /* Layer 3: HUD UI */
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    /* 로딩 오버레이 */
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.85);
+      z-index: 100;
+      gap: 16px;
+    }
+    #loading-text { font-size: 1.2rem; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- Layer 0: 웹캠 영상 -->
+    <video id="video" autoplay playsinline muted></video>
+
+    <!-- Layer 1: 손 랜드마크 스켈레톤 (디버그 토글 가능) -->
+    <canvas id="canvas-skeleton"></canvas>
+
+    <!-- Layer 2: 영역전개 시각 효과 -->
+    <canvas id="canvas-effect"></canvas>
+
+    <!-- Layer 3: HUD 오버레이 -->
+    <div id="hud"></div>
+
+    <!-- 초기 로딩 화면 -->
+    <div id="loading">
+      <div id="loading-text">모델 & 카메라 초기화 중...</div>
+    </div>
+  </div>
+
+  <!-- 앱 진입점 (ES Module) -->
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
