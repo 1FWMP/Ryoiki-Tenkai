@@ -15,6 +15,7 @@
 import { HandTracker }        from './core/HandTracker.js';
 import { GestureModel }       from './core/GestureModel.js';
 import { GestureRecognizer }  from './core/GestureRecognizer.js';
+import { EffectManager }      from './effects/EffectManager.js';
 
 // ──────────────────────────────────────────────
 // DOM 요소 참조
@@ -40,6 +41,10 @@ const recognizer = new GestureRecognizer({
   minConfidence:  0.85,  // 85% 이상 신뢰도
   cooldownFrames: 60,    // 확정 후 60프레임 쿨다운
 });
+
+// EffectManager — canvas-effect 위에 영역전개 효과를 그린다.
+// 캔버스 크기는 resizeCanvases() 호출 후 확정되므로 임시로 0,0 으로 초기화
+const effectManager = new EffectManager(ctxEffect, 0, 0);
 
 // ──────────────────────────────────────────────
 // 초기화 함수
@@ -82,6 +87,9 @@ function resizeCanvases() {
 
   canvasSkel.width  = canvasEffect.width  = w;
   canvasSkel.height = canvasEffect.height = h;
+
+  // 효과 인스턴스의 크기도 동기화
+  effectManager.resize(w, h);
 }
 
 // ──────────────────────────────────────────────
@@ -90,12 +98,13 @@ function resizeCanvases() {
 
 /**
  * 제스처 확정 이벤트: 해당 캐릭터의 영역전개 효과를 발동한다.
- * EffectManager 구현 전까지는 콘솔에 출력.
  */
 recognizer.on('confirmed', ({ className, confidence }) => {
   console.log(`✅ 영역전개 확정: ${className} (${(confidence * 100).toFixed(1)}%)`);
 
-  // TODO: EffectManager.trigger(className) 연결 (Day 4)
+  // 캐릭터에 맞는 영역전개 효과 발동
+  effectManager.trigger(className);
+
   hudEl.textContent = `✅ ${className.toUpperCase()} — ${(confidence * 100).toFixed(0)}%`;
 });
 
@@ -103,7 +112,8 @@ recognizer.on('confirmed', ({ className, confidence }) => {
  * 리셋 이벤트: 손이 사라져 대기 상태로 복귀 → 효과 종료
  */
 recognizer.on('reset', () => {
-  // TODO: EffectManager.reset() 연결
+  // 효과 중단 및 캔버스 클리어
+  effectManager.reset();
   hudEl.textContent = '';
 });
 
@@ -118,8 +128,9 @@ recognizer.on('reset', () => {
  *  2. 스켈레톤 시각화 (디버그)
  *  3. 제스처 추론 & 확정 판정
  *  4. HUD 진행 바 업데이트
+ *  5. 영역전개 효과 렌더 (EffectManager)
  */
-function renderLoop() {
+function renderLoop(timestamp) {
   // 비디오가 준비되지 않았으면 건너뜀
   if (videoEl.readyState < 2) {
     requestAnimationFrame(renderLoop);
@@ -154,6 +165,9 @@ function renderLoop() {
     // 손이 감지되지 않으면 인식기에 알려 스트릭 초기화 및 효과 종료 처리
     recognizer.handleNoHand();
   }
+
+  // ── 영역전개 효과 렌더 (활성 효과가 있을 때만 실행) ──
+  effectManager.draw(timestamp);
 
   requestAnimationFrame(renderLoop);
 }
@@ -234,3 +248,17 @@ async function init() {
 
 // DOM 로드 완료 후 초기화 실행
 init();
+
+// ──────────────────────────────────────────────
+// 테스트용 키보드 단축키
+//   1 → 고죠 (무량공처)
+//   2 → 료멘 (맹독한 사당)
+//   3 → 메구미 (嵌합암영정)
+//   0 → 효과 초기화
+// ──────────────────────────────────────────────
+window.addEventListener('keydown', (e) => {
+  if      (e.key === '1') effectManager.trigger('gojo');
+  else if (e.key === '2') effectManager.trigger('ryomen');
+  else if (e.key === '3') effectManager.trigger('megumi');
+  else if (e.key === '0') effectManager.reset();
+});
