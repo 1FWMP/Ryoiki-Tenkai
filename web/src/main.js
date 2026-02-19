@@ -9,7 +9,8 @@
  *  3. 웹캠 스트림 획득 (getUserMedia)
  *  4. GestureRecognizer 이벤트 바인딩
  *  5. requestAnimationFrame 루프 시작
- *     → HandTracker.detect() → GestureModel.inferSync() → GestureRecognizer.update()
+ *     → HandTracker.detectBothHands() → HandTracker.normalizeBothHands()
+ *     → GestureModel.inferSync() → GestureRecognizer.update()
  */
 
 import { HandTracker }        from './core/HandTracker.js';
@@ -140,29 +141,33 @@ function renderLoop(timestamp) {
   // 스켈레톤 캔버스 초기화
   ctxSkel.clearRect(0, 0, canvasSkel.width, canvasSkel.height);
 
-  // ── 손 랜드마크 감지 ──
-  const handsLandmarks = tracker.detect(videoEl);
+  // ── 양손 랜드마크 감지 (handedness 기준 Left/Right 분류) ──
+  const handsMap = tracker.detectBothHands(videoEl);
+  const hasAnyHand = handsMap.Left !== null || handsMap.Right !== null;
 
-  if (handsLandmarks.length > 0) {
-    // 첫 번째 감지된 손의 랜드마크 사용 (멀티핸드 확장 가능)
-    const landmarks = handsLandmarks[0];
+  if (hasAnyHand) {
+    // 감지된 각 손의 랜드마크를 디버그 시각화
+    if (handsMap.Left)  drawLandmarks(ctxSkel, handsMap.Left);
+    if (handsMap.Right) drawLandmarks(ctxSkel, handsMap.Right);
 
-    // 디버그: 랜드마크 점 시각화
-    drawLandmarks(ctxSkel, landmarks);
+    // 126차원 정규화 벡터 생성: [왼손 63 | 오른손 63]
+    // 감지되지 않은 손은 0으로 패딩 (unknown 클래스가 처리)
+    const vector = HandTracker.normalizeBothHands(handsMap);
 
-    // 63차원 정규화 벡터 생성
-    const vector = HandTracker.normalizeLandmarks(landmarks);
+    // 감지된 손 개수 (GestureRecognizer의 손 개수 검증에 사용)
+    const handCount = (handsMap.Left !== null ? 1 : 0) + (handsMap.Right !== null ? 1 : 0);
 
     // ── 제스처 추론 (동기) ──
     if (model.isLoaded) {
       const inferResult = model.inferSync(vector);
-      recognizer.update(inferResult);
+      // handCount를 함께 전달해 클래스별 손 개수 조건 검증
+      recognizer.update(inferResult, handCount);
 
       // HUD: 현재 진행 상황 업데이트
       updateProgressHUD(inferResult);
     }
   } else {
-    // 손이 감지되지 않으면 인식기에 알려 스트릭 초기화 및 효과 종료 처리
+    // 손이 전혀 감지되지 않으면 인식기에 알려 스트릭 초기화 및 효과 종료 처리
     recognizer.handleNoHand();
   }
 

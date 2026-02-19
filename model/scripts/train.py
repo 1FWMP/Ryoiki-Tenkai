@@ -3,11 +3,15 @@ train.py
 ────────
 랜드마크 CSV 데이터를 읽어 Keras MLP 모델을 학습시키는 스크립트.
 
+[변경] v2 — 양손 126차원 + unknown 클래스
+  - 입력: 126차원 (왼손 63 + 오른손 63)
+  - 출력: 4클래스 (gojo / megumi / ryomen / unknown)
+
 네트워크 구조:
-    Input(63)
+    Input(126)
     → Dense(128, relu) → Dropout(0.3)
     → Dense(64,  relu) → Dropout(0.3)
-    → Dense(3,   softmax)
+    → Dense(4,   softmax)
 
 출력:
     model/models/gesture_model.h5  (학습된 Keras 모델)
@@ -39,9 +43,9 @@ OUTPUT_PATH   = os.path.join(MODELS_DIR, 'gesture_model.h5')
 # 하이퍼파라미터
 # ──────────────────────────────────────────────
 
-CLASSES       = ['gojo', 'ryomen', 'megumi']
-NUM_CLASSES   = len(CLASSES)    # 3
-INPUT_DIM     = 63              # 21 랜드마크 × (x, y, z)
+CLASSES       = ['gojo', 'ryomen', 'megumi', 'unknown']
+NUM_CLASSES   = len(CLASSES)    # 4
+INPUT_DIM     = 126             # 양손 21 랜드마크 × (x, y, z) × 2
 
 EPOCHS        = 100             # 최대 학습 에포크 수
 BATCH_SIZE    = 32
@@ -64,7 +68,7 @@ def load_data():
     특징 행렬 X와 레이블 벡터 y를 반환.
 
     반환값:
-        X : numpy array, shape (N, 63)  — 63차원 랜드마크 벡터
+        X : numpy array, shape (N, 126) — 126차원 랜드마크 벡터 (양손)
         y : numpy array, shape (N,)     — 정수 인코딩된 클래스 레이블
         encoder : LabelEncoder 인스턴스  — 나중에 클래스명 복원에 사용
     """
@@ -74,7 +78,23 @@ def load_data():
         if not os.path.exists(csv_path):
             print(f"[경고] CSV 없음 — 건너뜀: {csv_path}")
             continue
-        df = pd.read_csv(csv_path)
+        # header=None: CSV에 헤더 행이 없음
+        # 컬럼 구조: [0~125] 특징값(126차원) + [126] 레이블 문자열
+        df = pd.read_csv(csv_path, header=None)
+
+        # 첫 번째 행이 실수값인지 확인해 헤더 행을 잘못 읽은 경우를 걸러냄
+        # (헤더가 있는 CSV를 header=None으로 읽으면 첫 행에 'lx0' 같은 문자열이 들어옴)
+        try:
+            float(df.iloc[0, 0])
+        except (ValueError, TypeError):
+            # 첫 행이 헤더 — header=0으로 다시 읽기
+            df = pd.read_csv(csv_path, header=0)
+            # 'label' 컬럼 제외한 나머지를 숫자 인덱스로 재매핑
+            df.columns = list(range(len(df.columns) - 1)) + ['label']
+        else:
+            # 헤더 없는 경우: 마지막 열(126)을 'label'로 이름 지정
+            df.columns = list(range(INPUT_DIM)) + ['label']
+
         dfs.append(df)
         print(f"  [{cls}] {len(df):5d}개 로드 완료")
 
@@ -87,11 +107,11 @@ def load_data():
     data = pd.concat(dfs, ignore_index=True)
     data = data.sample(frac=1, random_state=RANDOM_SEED)  # 셔플
 
-    # 특징(x0~z20)과 레이블(label) 분리
-    feature_cols = [c for c in data.columns if c != 'label']
+    # 특징(0~INPUT_DIM-1)과 레이블('label') 분리
+    feature_cols = list(range(INPUT_DIM))
     X = data[feature_cols].values.astype(np.float32)
 
-    # 문자열 레이블 → 정수 인코딩 (gojo=0, megumi=1, ryomen=2)
+    # 문자열 레이블 → 정수 인코딩 (알파벳 순: gojo=0, megumi=1, ryomen=2, unknown=3)
     encoder = LabelEncoder()
     y = encoder.fit_transform(data['label'].values)
 
@@ -105,12 +125,12 @@ def load_data():
 
 def build_model():
     """
-    프롬프트 명세 기반 MLP 모델 생성.
+    MLP 모델 생성.
 
-    구조: Input(63) → Dense(128) → Dropout → Dense(64) → Dropout → Dense(3)
+    구조: Input(126) → Dense(128) → Dropout → Dense(64) → Dropout → Dense(4)
     """
     model = keras.Sequential([
-        # 입력층: 63차원 랜드마크 벡터
+        # 입력층: 126차원 랜드마크 벡터 (양손 합산)
         layers.Input(shape=(INPUT_DIM,)),
 
         # 은닉층 1: 128 유닛, ReLU 활성화
@@ -121,7 +141,7 @@ def build_model():
         layers.Dense(64, activation='relu'),
         layers.Dropout(DROPOUT_RATE),
 
-        # 출력층: 3개 클래스 확률값 (Softmax)
+        # 출력층: 4개 클래스 확률값 (gojo / megumi / ryomen / unknown)
         layers.Dense(NUM_CLASSES, activation='softmax'),
     ], name='gesture_mlp')
 

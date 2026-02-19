@@ -2,14 +2,18 @@
  * GestureModel.js
  * ───────────────
  * TensorFlow.js를 사용해 변환된 MLP 모델을 로드하고
- * 63차원 랜드마크 벡터로 제스처 클래스를 추론하는 클래스.
+ * 126차원 랜드마크 벡터로 제스처 클래스를 추론하는 클래스.
+ *
+ * [변경] v2 — 양손 126차원 + unknown 클래스 대응
+ *   - 입력 벡터: 63 → 126 (양손)
+ *   - CLASS_NAMES: 3 → 4 (unknown 추가)
  *
  * 모델 파일 위치: /public/tfjs_model/model.json (Vite 개발 서버 기준)
  *
  * 사용 예시:
  *   const model = new GestureModel();
  *   await model.load();
- *   const result = await model.infer(float32Array63);
+ *   const result = await model.infer(float32Array126);
  *   // result: { classIndex: 0, className: 'gojo', confidence: 0.97 }
  */
 
@@ -20,8 +24,9 @@ import * as tf from "@tensorflow/tfjs";
 // train.py의 LabelEncoder는 클래스명을 알파벳 순으로 정렬하므로
 // 아래 순서는 Python의 encoder.classes_ 와 반드시 일치해야 한다.
 // 학습 후 train.py 출력에서 인덱스 순서를 확인할 것.
+// 알파벳 순: gojo(0) / megumi(1) / ryomen(2) / unknown(3)
 // ──────────────────────────────────────────────
-export const CLASS_NAMES = ["gojo", "megumi", "ryomen"];
+export const CLASS_NAMES = ["gojo", "megumi", "ryomen", "unknown"];
 
 // 모델 파일 경로 (Vite의 public/ 폴더 = 루트 경로로 제공)
 const MODEL_URL = "/tfjs_model/model.json";
@@ -50,7 +55,8 @@ export class GestureModel {
 
       // 첫 번째 추론은 웜업 (JIT 컴파일 등으로 지연이 생길 수 있음)
       // 더미 텐서로 미리 실행해 실제 추론 지연을 줄인다.
-      const warmup = tf.zeros([1, 63]);
+      // 입력 차원: 126 (양손 21개 랜드마크 × 3축 × 2)
+      const warmup = tf.zeros([1, 126]);
       this._model.predict(warmup).dispose();
       warmup.dispose();
 
@@ -116,22 +122,22 @@ export class GestureModel {
   }
 
   /**
-   * 63차원 랜드마크 벡터를 입력받아 제스처 클래스를 추론한다.
+   * 126차원 랜드마크 벡터를 입력받아 제스처 클래스를 추론한다.
    *
-   * @param {Float32Array} vector - 길이 63의 정규화된 랜드마크 벡터
+   * @param {Float32Array} vector - 길이 126의 정규화된 랜드마크 벡터 (양손)
    * @returns {Promise<{classIndex: number, className: string, confidence: number, probabilities: Float32Array}>}
    *   - classIndex   : 예측 클래스 인덱스
-   *   - className    : 예측 클래스명 ('gojo' | 'megumi' | 'ryomen')
+   *   - className    : 예측 클래스명 ('gojo' | 'megumi' | 'ryomen' | 'unknown')
    *   - confidence   : 예측 확률 (0.0 ~ 1.0)
-   *   - probabilities: 전체 클래스 확률값 배열 (길이 3)
+   *   - probabilities: 전체 클래스 확률값 배열 (길이 4)
    */
   async infer(vector) {
     if (!this._model) {
       throw new Error("[GestureModel] load()를 먼저 호출하세요.");
     }
 
-    // Float32Array → 2D 텐서 [1, 63] 로 변환
-    const inputTensor = tf.tensor2d([Array.from(vector)], [1, 63]);
+    // Float32Array → 2D 텐서 [1, 126] 로 변환
+    const inputTensor = tf.tensor2d([Array.from(vector)], [1, 126]);
 
     // 추론 실행 — 결과: [1, 3] softmax 출력
     const outputTensor = this._model.predict(inputTensor);
@@ -167,7 +173,7 @@ export class GestureModel {
    * 동기 방식 추론. requestAnimationFrame 루프에서 async/await 없이 사용할 때 활용.
    * tf.tidy()로 텐서 자원을 자동 정리한다.
    *
-   * @param {Float32Array} vector - 길이 63의 정규화된 랜드마크 벡터
+   * @param {Float32Array} vector - 길이 126의 정규화된 랜드마크 벡터 (양손)
    * @returns {{ classIndex: number, className: string, confidence: number, probabilities: Float32Array }}
    */
   inferSync(vector) {
@@ -177,7 +183,7 @@ export class GestureModel {
 
     // tf.tidy: 콜백 내에서 생성된 중간 텐서를 자동으로 dispose
     const probabilities = tf.tidy(() => {
-      const input = tf.tensor2d([Array.from(vector)], [1, 63]);
+      const input = tf.tensor2d([Array.from(vector)], [1, 126]);
       const output = this._model.predict(input);
       return output.dataSync(); // 동기적으로 Float32Array 반환
     });
@@ -185,7 +191,7 @@ export class GestureModel {
     // ── 소프트맥스 이전 로짓값 출력 ──
     if (this._logitsModel) {
       const logits = tf.tidy(() => {
-        const input = tf.tensor2d([Array.from(vector)], [1, 63]);
+        const input = tf.tensor2d([Array.from(vector)], [1, 126]);
         return this._logitsModel.predict(input).dataSync();
       });
       console.log(
