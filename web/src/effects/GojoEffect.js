@@ -273,30 +273,43 @@ export class GojoEffect {
     ctx.fill();
     ctx.restore();
 
-    // ─ 6. 텍스트 페이드 인 (1.2초 후) ─
-    if (elapsed > 1200) {
-      const textAlpha = Math.min((elapsed - 1200) / 800, 1);
+  }
 
-      ctx.save();
-      ctx.globalAlpha = textAlpha;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.globalCompositeOperation = "screen";
+  /**
+   * 텍스트만 별도 캔버스(canvas-text, z-index:4)에 그린다.
+   * EffectManager.draw() 에서 canvas-person 위 레이어에 호출된다.
+   *
+   * @param {CanvasRenderingContext2D} ctx - canvas-text 의 2D 컨텍스트
+   * @param {DOMHighResTimeStamp} timestamp
+   */
+  drawText(ctx, timestamp) {
+    if (!this.active) return;
 
-      // 한자 — 강렬한 보라 글로우
-      ctx.shadowColor = "rgba(255, 160, 255, 1.0)";
-      ctx.shadowBlur = 40;
-      ctx.font = "bold 72px serif";
-      ctx.fillStyle = "#ffffff";
-      ctx.fillText("無量空處", cx, h - 145);
+    const elapsed = Math.max(0, timestamp - this.startTime);
+    if (elapsed <= 1200) return; // 1.2초 후 페이드 인
 
-      // 한글 부제
-      ctx.shadowBlur = 20;
-      ctx.font = 'bold 32px "Noto Sans KR", serif';
-      ctx.fillStyle = "rgba(255, 200, 255, 0.92)";
-      ctx.fillText("무량공처", cx, h - 88);
+    const { width: w, height: h } = this;
+    const cx = w / 2;
+    const textAlpha = Math.min((elapsed - 1200) / 800, 1);
 
-      ctx.restore();
-    }
+    ctx.save();
+    ctx.globalAlpha = textAlpha;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    // 한자 — 강렬한 보라 글로우
+    ctx.shadowColor = "rgba(255, 160, 255, 1.0)";
+    ctx.shadowBlur = 40;
+    ctx.font = "bold 72px serif";
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText("無量空處", cx, h - 145);
+
+    // 한글 부제
+    ctx.shadowBlur = 20;
+    ctx.font = 'bold 32px "Noto Sans KR", serif';
+    ctx.fillStyle = "rgba(255, 200, 255, 0.92)";
+    ctx.fillText("무량공처", cx, h - 88);
+
+    ctx.restore();
   }
 }

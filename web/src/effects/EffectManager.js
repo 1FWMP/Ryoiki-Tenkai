@@ -23,12 +23,14 @@ import { MegumiEffect } from "./MegumiEffect.js";
 
 export class EffectManager {
   /**
-   * @param {CanvasRenderingContext2D} ctx    - canvas-effect 의 2D 컨텍스트
-   * @param {number}                   width  - 캔버스 너비 (px)
-   * @param {number}                   height - 캔버스 높이 (px)
+   * @param {CanvasRenderingContext2D} ctx     - canvas-effect 의 2D 컨텍스트 (배경 효과)
+   * @param {number}                   width   - 캔버스 너비 (px)
+   * @param {number}                   height  - 캔버스 높이 (px)
+   * @param {CanvasRenderingContext2D} ctxText - canvas-text 의 2D 컨텍스트 (텍스트 — 사람 위)
    */
-  constructor(ctx, width, height) {
+  constructor(ctx, width, height, ctxText = null) {
     this.ctx = ctx;
+    this.ctxText = ctxText; // 사람 누끼 위에 텍스트를 그릴 별도 캔버스 컨텍스트
     this.width = width;
     this.height = height;
 
@@ -81,9 +83,15 @@ export class EffectManager {
     const effect = this.effects[this.activeKey];
     if (!effect) return;
 
-    // 이전 프레임 지우기 후 효과 렌더
+    // 이전 프레임 지우기 후 배경 효과 렌더
     this.ctx.clearRect(0, 0, this.width, this.height);
     effect.draw(timestamp);
+
+    // 텍스트는 canvas-text (사람 위 레이어)에 별도 렌더
+    if (this.ctxText) {
+      this.ctxText.clearRect(0, 0, this.width, this.height);
+      effect.drawText(this.ctxText, timestamp);
+    }
   }
 
   /**
@@ -93,6 +101,10 @@ export class EffectManager {
   reset() {
     this._stopCurrent();
     this.ctx.clearRect(0, 0, this.width, this.height);
+    // 텍스트 캔버스도 함께 초기화
+    if (this.ctxText) {
+      this.ctxText.clearRect(0, 0, this.width, this.height);
+    }
   }
 
   /**

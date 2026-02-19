@@ -178,30 +178,44 @@ export class RyomenEffect {
     // ─ 6. 수직 스캔 라인 효과 (저주 에너지 분위기) ─
     this._drawScanLines(w, h, elapsed);
 
-    // ─ 7. 한자 텍스트 페이드 인 (0.8초 후 등장) ─
-    if (elapsed > 800) {
-      const textAlpha = Math.min((elapsed - 800) / 700, 1);
+  }
 
-      ctx.save();
-      ctx.globalAlpha = textAlpha;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.shadowColor = "rgba(255, 20, 0, 0.95)";
-      ctx.shadowBlur = 30;
+  /**
+   * 텍스트만 별도 캔버스(canvas-text, z-index:4)에 그린다.
+   * EffectManager.draw() 에서 canvas-person 위 레이어에 호출된다.
+   *
+   * @param {CanvasRenderingContext2D} ctx - canvas-text 의 2D 컨텍스트
+   * @param {DOMHighResTimeStamp} timestamp
+   */
+  drawText(ctx, timestamp) {
+    if (!this.active) return;
 
-      // 한자 — 크고 붉게
-      ctx.font = "bold 68px serif";
-      ctx.fillStyle = "#ff5533";
-      ctx.fillText("伏魔御廚子", cx, h - 145);
+    const elapsed = Math.max(0, timestamp - this.startTime);
+    if (elapsed <= 800) return; // 0.8초 후 페이드 인
 
-      // 한글 부제
-      ctx.shadowBlur = 16;
-      ctx.font = 'bold 30px "Noto Sans KR", serif';
-      ctx.fillStyle = "rgba(255, 160, 100, 0.90)";
-      ctx.fillText("복마어주자", cx, h - 88);
+    const { width: w, height: h } = this;
+    const cx = w / 2;
+    const textAlpha = Math.min((elapsed - 800) / 700, 1);
 
-      ctx.restore();
-    }
+    ctx.save();
+    ctx.globalAlpha = textAlpha;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(255, 20, 0, 0.95)";
+    ctx.shadowBlur = 30;
+
+    // 한자 — 크고 붉게
+    ctx.font = "bold 68px serif";
+    ctx.fillStyle = "#ff5533";
+    ctx.fillText("伏魔御廚子", cx, h - 145);
+
+    // 한글 부제
+    ctx.shadowBlur = 16;
+    ctx.font = 'bold 30px "Noto Sans KR", serif';
+    ctx.fillStyle = "rgba(255, 160, 100, 0.90)";
+    ctx.fillText("복마어주자", cx, h - 88);
+
+    ctx.restore();
   }
 
   // ── 내부 헬퍼 ────────────────────────────────────

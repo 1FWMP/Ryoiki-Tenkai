@@ -6,31 +6,42 @@
  * 실행 흐름:
  *  1. HandTracker 초기화 (MediaPipe WASM 로드)
  *  2. GestureModel 로드 (TF.js 모델 로드)
- *  3. 웹캠 스트림 획득 (getUserMedia)
- *  4. GestureRecognizer 이벤트 바인딩
- *  5. requestAnimationFrame 루프 시작
+ *  3. PersonSegmenter 초기화 (MediaPipe ImageSegmenter — selfie segmentation)
+ *  4. 웹캠 스트림 획득 (getUserMedia)
+ *  5. GestureRecognizer 이벤트 바인딩
+ *  6. requestAnimationFrame 루프 시작
  *     → HandTracker.detectBothHands() → HandTracker.normalizeBothHands()
  *     → GestureModel.inferSync() → GestureRecognizer.update()
+ *     → PersonSegmenter.drawPerson() — 사람 누끼를 canvas-person에 그림
+ *
+ * 레이어 순서 (z-index 낮음 → 높음):
+ *   body(#000) → video(-1, 숨김) → canvas-effect(1) → canvas-skeleton(2)
+ *   → canvas-person(3, 누끼) → hud(10)
  */
 
 import { HandTracker }        from './core/HandTracker.js';
 import { GestureModel }       from './core/GestureModel.js';
 import { GestureRecognizer }  from './core/GestureRecognizer.js';
 import { EffectManager }      from './effects/EffectManager.js';
+import { PersonSegmenter }    from './core/PersonSegmenter.js';
 
 // ──────────────────────────────────────────────
 // DOM 요소 참조
 // ──────────────────────────────────────────────
-const videoEl     = document.getElementById('video');
-const canvasSkel  = document.getElementById('canvas-skeleton');
+const videoEl      = document.getElementById('video');
+const canvasSkel   = document.getElementById('canvas-skeleton');
 const canvasEffect = document.getElementById('canvas-effect');
-const hudEl       = document.getElementById('hud');
-const loadingEl   = document.getElementById('loading');
-const loadingText = document.getElementById('loading-text');
+const canvasPerson = document.getElementById('canvas-person');  // 사람 누끼 레이어
+const canvasText   = document.getElementById('canvas-text');    // 영역전개 텍스트 (사람 위)
+const hudEl        = document.getElementById('hud');
+const loadingEl    = document.getElementById('loading');
+const loadingText  = document.getElementById('loading-text');
 
 // Canvas 2D 컨텍스트
 const ctxSkel   = canvasSkel.getContext('2d');
 const ctxEffect = canvasEffect.getContext('2d');
+const ctxPerson = canvasPerson.getContext('2d'); // 누끼 출력용
+const ctxText   = canvasText.getContext('2d');   // 영역전개 텍스트 출력용
 
 // ──────────────────────────────────────────────
 // 모듈 인스턴스
@@ -43,9 +54,13 @@ const recognizer = new GestureRecognizer({
   cooldownFrames: 60,    // 확정 후 60프레임 쿨다운
 });
 
-// EffectManager — canvas-effect 위에 영역전개 효과를 그린다.
+// EffectManager — canvas-effect에 배경 효과, canvas-text에 텍스트를 그린다.
 // 캔버스 크기는 resizeCanvases() 호출 후 확정되므로 임시로 0,0 으로 초기화
-const effectManager = new EffectManager(ctxEffect, 0, 0);
+const effectManager = new EffectManager(ctxEffect, 0, 0, ctxText);
+
+// PersonSegmenter — canvas-person에 배경 제거된 사람 이미지를 그린다.
+// 초기 크기는 resizeCanvases()에서 확정됨
+const personSegmenter = new PersonSegmenter(0, 0);
 
 // ──────────────────────────────────────────────
 // 초기화 함수
@@ -86,11 +101,15 @@ function resizeCanvases() {
   const w = videoEl.videoWidth  || window.innerWidth;
   const h = videoEl.videoHeight || window.innerHeight;
 
-  canvasSkel.width  = canvasEffect.width  = w;
-  canvasSkel.height = canvasEffect.height = h;
+  // 모든 캔버스 크기 동기화
+  canvasSkel.width  = canvasEffect.width  = canvasPerson.width  = canvasText.width  = w;
+  canvasSkel.height = canvasEffect.height = canvasPerson.height = canvasText.height = h;
 
   // 효과 인스턴스의 크기도 동기화
   effectManager.resize(w, h);
+
+  // 누끼 세그멘터의 오프스크린 캔버스 크기 동기화
+  personSegmenter.resize(w, h);
 }
 
 // ──────────────────────────────────────────────
@@ -130,6 +149,7 @@ recognizer.on('reset', () => {
  *  3. 제스처 추론 & 확정 판정
  *  4. HUD 진행 바 업데이트
  *  5. 영역전개 효과 렌더 (EffectManager)
+ *  6. 사람 누끼 렌더 (PersonSegmenter) — 효과 위에 그려짐
  */
 function renderLoop(timestamp) {
   // 비디오가 준비되지 않았으면 건너뜀
@@ -173,6 +193,9 @@ function renderLoop(timestamp) {
 
   // ── 영역전개 효과 렌더 (활성 효과가 있을 때만 실행) ──
   effectManager.draw(timestamp);
+
+  // ── 사람 누끼 렌더 (canvas-person, z-index:3 — 효과 위에 표시) ──
+  personSegmenter.drawPerson(videoEl, ctxPerson, timestamp);
 
   requestAnimationFrame(renderLoop);
 }
@@ -223,18 +246,22 @@ function updateProgressHUD(inferResult) {
 
 async function init() {
   try {
-    // HandTracker (MediaPipe) 초기화
-    loadingText.textContent = 'MediaPipe 모델 로드 중...';
+    // HandTracker (MediaPipe HandLandmarker) 초기화
+    loadingText.textContent = 'MediaPipe 손 감지 모델 로드 중...';
     await tracker.init();
 
-    // TF.js 모델 로드
+    // TF.js 제스처 분류 모델 로드
     loadingText.textContent = 'TF.js 제스처 모델 로드 중...';
     await model.load();
+
+    // PersonSegmenter (MediaPipe ImageSegmenter — selfie segmentation) 초기화
+    loadingText.textContent = '누끼 세그멘테이션 모델 로드 중...';
+    await personSegmenter.init();
 
     // 웹캠 스트림 시작
     await startCamera();
 
-    // 캔버스 크기 설정
+    // 캔버스 크기 설정 (비디오 해상도 기준)
     resizeCanvases();
     window.addEventListener('resize', resizeCanvases);
 

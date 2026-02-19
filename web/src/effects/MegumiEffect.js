@@ -261,10 +261,6 @@ export class MegumiEffect {
     ctx.arc(cx, cy, 28 * innerPulse, 0, Math.PI * 2);
     ctx.fill();
 
-    // 10. 텍스트 (1.5초 후 등장)
-    if (elapsed > 1500) {
-      this._drawText(cx, h, Math.min((elapsed - 1500) / 1000, 1), t);
-    }
   }
 
   // ── 내부 헬퍼 ─────────────────────────────────────────────────
@@ -444,16 +440,37 @@ export class MegumiEffect {
   }
 
   /**
+   * 텍스트만 별도 캔버스(canvas-text, z-index:4)에 그린다.
+   * EffectManager.draw() 에서 canvas-person 위 레이어에 호출된다.
+   *
+   * @param {CanvasRenderingContext2D} ctx - canvas-text 의 2D 컨텍스트
+   * @param {DOMHighResTimeStamp} timestamp
+   */
+  drawText(ctx, timestamp) {
+    if (!this.active) return;
+
+    const elapsed = Math.max(0, timestamp - this.startTime);
+    if (elapsed <= 1500) return; // 1.5초 후 페이드 인
+
+    const { width: w, height: h } = this;
+    const cx = w / 2;
+    const alpha = Math.min((elapsed - 1500) / 1000, 1);
+    const t = elapsed / 1000;
+
+    this._drawText(ctx, cx, h, alpha, t);
+  }
+
+  /**
    * 영역전개 텍스트를 렌더링한다.
    * 글로우 레이어 → 메인 → 얇은 테두리 순서로 겹쳐 각인 느낌을 낸다.
    *
+   * @param {CanvasRenderingContext2D} ctx - 그릴 캔버스 컨텍스트
    * @param {number} cx    - 수평 중심
    * @param {number} h     - 화면 높이
    * @param {number} alpha - 불투명도 0~1
    * @param {number} t     - 경과 시간(초) — 깜빡임 위상
    */
-  _drawText(cx, h, alpha, t) {
-    const { ctx } = this;
+  _drawText(ctx, cx, h, alpha, t) {
     ctx.save();
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
