@@ -25,6 +25,20 @@
 import { EventEmitter } from '../utils/EventEmitter.js';
 
 // ──────────────────────────────────────────────
+// 클래스별 필요 손 개수
+// collect_data.py의 CLASS_HAND_COUNT와 반드시 동일해야 한다.
+//   1 = 한 손 (gojo)
+//   2 = 양손 (ryomen, megumi)
+//   0 = 제한 없음
+// ──────────────────────────────────────────────
+const REQUIRED_HANDS = {
+  gojo:    1,
+  ryomen:  2,
+  megumi:  2,
+  unknown: 0,
+};
+
+// ──────────────────────────────────────────────
 // 기본 설정값
 // ──────────────────────────────────────────────
 
@@ -74,13 +88,30 @@ export class GestureRecognizer extends EventEmitter {
    *
    * @param {{ className: string, confidence: number }} inferResult
    *   GestureModel.infer() 또는 inferSync()의 반환값
+   * @param {number} handCount - 현재 프레임에서 감지된 손 개수 (0, 1, 2)
    */
-  update(inferResult) {
+  update(inferResult, handCount = 0) {
     const { className, confidence } = inferResult;
 
     // 쿨다운 카운터 감소
     if (this._cooldownCount > 0) {
       this._cooldownCount--;
+    }
+
+    // ── unknown 클래스: 어떤 포즈에도 해당하지 않음 → 스트릭 초기화 ──
+    // 모델이 unknown을 예측하면 이전 연속 프레임 카운트를 리셋한다.
+    if (className === 'unknown') {
+      this._resetStreak();
+      return;
+    }
+
+    // ── 손 개수 불일치: 스트릭 초기화 ──
+    // 예) gojo(1손)인데 양손 감지됨 → 리셋
+    // 예) megumi(2손)인데 한 손만 감지됨 → 리셋
+    const required = REQUIRED_HANDS[className] ?? 0;
+    if (required > 0 && handCount !== required) {
+      this._resetStreak();
+      return;
     }
 
     // ── 신뢰도 미달: 연속 카운트 초기화 ──

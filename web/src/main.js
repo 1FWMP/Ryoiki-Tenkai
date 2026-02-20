@@ -6,40 +6,61 @@
  * 실행 흐름:
  *  1. HandTracker 초기화 (MediaPipe WASM 로드)
  *  2. GestureModel 로드 (TF.js 모델 로드)
- *  3. 웹캠 스트림 획득 (getUserMedia)
- *  4. GestureRecognizer 이벤트 바인딩
- *  5. requestAnimationFrame 루프 시작
- *     → HandTracker.detect() → GestureModel.inferSync() → GestureRecognizer.update()
+ *  3. PersonSegmenter 초기화 (MediaPipe ImageSegmenter — selfie segmentation)
+ *  4. 웹캠 스트림 획득 (getUserMedia)
+ *  5. GestureRecognizer 이벤트 바인딩
+ *  6. requestAnimationFrame 루프 시작
+ *     → HandTracker.detectBothHands() → HandTracker.normalizeBothHands()
+ *     → GestureModel.inferSync() → GestureRecognizer.update()
+ *     → PersonSegmenter.drawPerson() — 사람 누끼를 canvas-person에 그림
+ *
+ * 레이어 순서 (z-index 낮음 → 높음):
+ *   body(#000) → video(-1, 숨김) → canvas-effect(1) → canvas-skeleton(2)
+ *   → canvas-person(3, 누끼) → hud(10)
  */
 
-import { HandTracker }        from './core/HandTracker.js';
-import { GestureModel }       from './core/GestureModel.js';
-import { GestureRecognizer }  from './core/GestureRecognizer.js';
+import { HandTracker } from "./core/HandTracker.js";
+import { GestureModel } from "./core/GestureModel.js";
+import { GestureRecognizer } from "./core/GestureRecognizer.js";
+import { EffectManager } from "./effects/EffectManager.js";
+import { PersonSegmenter } from "./core/PersonSegmenter.js";
 
 // ──────────────────────────────────────────────
 // DOM 요소 참조
 // ──────────────────────────────────────────────
-const videoEl     = document.getElementById('video');
-const canvasSkel  = document.getElementById('canvas-skeleton');
-const canvasEffect = document.getElementById('canvas-effect');
-const hudEl       = document.getElementById('hud');
-const loadingEl   = document.getElementById('loading');
-const loadingText = document.getElementById('loading-text');
+const videoEl = document.getElementById("video");
+const canvasSkel = document.getElementById("canvas-skeleton");
+const canvasEffect = document.getElementById("canvas-effect");
+const canvasPerson = document.getElementById("canvas-person"); // 사람 누끼 레이어
+const canvasText = document.getElementById("canvas-text"); // 영역전개 텍스트 (사람 위)
+const hudEl = document.getElementById("hud");
+const loadingEl = document.getElementById("loading");
+const loadingText = document.getElementById("loading-text");
 
 // Canvas 2D 컨텍스트
-const ctxSkel   = canvasSkel.getContext('2d');
-const ctxEffect = canvasEffect.getContext('2d');
+const ctxSkel = canvasSkel.getContext("2d");
+const ctxEffect = canvasEffect.getContext("2d");
+const ctxPerson = canvasPerson.getContext("2d"); // 누끼 출력용
+const ctxText = canvasText.getContext("2d"); // 영역전개 텍스트 출력용
 
 // ──────────────────────────────────────────────
 // 모듈 인스턴스
 // ──────────────────────────────────────────────
-const tracker    = new HandTracker();
-const model      = new GestureModel();
+const tracker = new HandTracker();
+const model = new GestureModel();
 const recognizer = new GestureRecognizer({
-  requiredFrames: 15,    // 연속 15프레임 (≈0.5초 @30fps)
-  minConfidence:  0.85,  // 85% 이상 신뢰도
-  cooldownFrames: 60,    // 확정 후 60프레임 쿨다운
+  requiredFrames: 15, // 연속 15프레임 (≈0.5초 @30fps)
+  minConfidence: 0.85, // 85% 이상 신뢰도
+  cooldownFrames: 60, // 확정 후 60프레임 쿨다운
 });
+
+// EffectManager — canvas-effect에 배경 효과, canvas-text에 텍스트를 그린다.
+// 캔버스 크기는 resizeCanvases() 호출 후 확정되므로 임시로 0,0 으로 초기화
+const effectManager = new EffectManager(ctxEffect, 0, 0, ctxText);
+
+// PersonSegmenter — canvas-person에 배경 제거된 사람 이미지를 그린다.
+// 초기 크기는 resizeCanvases()에서 확정됨
+const personSegmenter = new PersonSegmenter(0, 0);
 
 // ──────────────────────────────────────────────
 // 초기화 함수
@@ -50,13 +71,13 @@ const recognizer = new GestureRecognizer({
  * 카메라 권한 거부 시 에러를 던진다.
  */
 async function startCamera() {
-  loadingText.textContent = '카메라 권한 요청 중...';
+  loadingText.textContent = "카메라 권한 요청 중...";
 
   const stream = await navigator.mediaDevices.getUserMedia({
     video: {
-      width:     { ideal: 1280 },
-      height:    { ideal: 720  },
-      facingMode: 'user',        // 전면 카메라
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      facingMode: "user", // 전면 카메라
     },
     audio: false,
   });
@@ -64,7 +85,7 @@ async function startCamera() {
   videoEl.srcObject = stream;
 
   // 비디오 메타데이터 로드 완료까지 대기
-  await new Promise(resolve => {
+  await new Promise((resolve) => {
     videoEl.onloadedmetadata = () => {
       videoEl.play();
       resolve();
@@ -77,11 +98,22 @@ async function startCamera() {
  * 창 크기 변경 시에도 다시 호출된다.
  */
 function resizeCanvases() {
-  const w = videoEl.videoWidth  || window.innerWidth;
-  const h = videoEl.videoHeight || window.innerHeight;
+  // 캔버스 픽셀 크기를 뷰포트 크기로 설정한다.
+  // 비디오는 CSS object-fit:cover 로 뷰포트를 채우므로,
+  // 캔버스도 동일한 해상도를 사용해야 누끼·효과가 비디오와 1:1로 정렬된다.
+  // (videoWidth×videoHeight를 쓰면 뷰포트 종횡비가 다를 때 CSS 스트레칭으로 찌그러짐)
+  const w = window.innerWidth;
+  const h = window.innerHeight;
 
-  canvasSkel.width  = canvasEffect.width  = w;
-  canvasSkel.height = canvasEffect.height = h;
+  // 모든 캔버스 크기 동기화
+  canvasSkel.width = canvasEffect.width = canvasPerson.width = canvasText.width = w;
+  canvasSkel.height = canvasEffect.height = canvasPerson.height = canvasText.height = h;
+
+  // 효과 인스턴스의 크기도 동기화
+  effectManager.resize(w, h);
+
+  // 누끼 세그멘터의 오프스크린 캔버스 크기 동기화
+  personSegmenter.resize(w, h);
 }
 
 // ──────────────────────────────────────────────
@@ -90,21 +122,22 @@ function resizeCanvases() {
 
 /**
  * 제스처 확정 이벤트: 해당 캐릭터의 영역전개 효과를 발동한다.
- * EffectManager 구현 전까지는 콘솔에 출력.
  */
-recognizer.on('confirmed', ({ className, confidence }) => {
+recognizer.on("confirmed", ({ className, confidence }) => {
   console.log(`✅ 영역전개 확정: ${className} (${(confidence * 100).toFixed(1)}%)`);
 
-  // TODO: EffectManager.trigger(className) 연결 (Day 4)
+  // 캐릭터에 맞는 영역전개 효과 발동
+  effectManager.trigger(className);
   hudEl.textContent = `✅ ${className.toUpperCase()} — ${(confidence * 100).toFixed(0)}%`;
 });
 
 /**
  * 리셋 이벤트: 손이 사라져 대기 상태로 복귀 → 효과 종료
  */
-recognizer.on('reset', () => {
-  // TODO: EffectManager.reset() 연결
-  hudEl.textContent = '';
+recognizer.on("reset", () => {
+  // 효과 중단 및 캔버스 클리어
+  effectManager.reset();
+  hudEl.textContent = "";
 });
 
 // ──────────────────────────────────────────────
@@ -118,8 +151,10 @@ recognizer.on('reset', () => {
  *  2. 스켈레톤 시각화 (디버그)
  *  3. 제스처 추론 & 확정 판정
  *  4. HUD 진행 바 업데이트
+ *  5. 영역전개 효과 렌더 (EffectManager)
+ *  6. 사람 누끼 렌더 (PersonSegmenter) — 효과 위에 그려짐
  */
-function renderLoop() {
+function renderLoop(timestamp) {
   // 비디오가 준비되지 않았으면 건너뜀
   if (videoEl.readyState < 2) {
     requestAnimationFrame(renderLoop);
@@ -129,30 +164,46 @@ function renderLoop() {
   // 스켈레톤 캔버스 초기화
   ctxSkel.clearRect(0, 0, canvasSkel.width, canvasSkel.height);
 
-  // ── 손 랜드마크 감지 ──
-  const handsLandmarks = tracker.detect(videoEl);
+  // ── 양손 랜드마크 감지 (handedness 기준 Left/Right 분류) ──
+  const handsMap = tracker.detectBothHands(videoEl);
+  const hasAnyHand = handsMap.Left !== null || handsMap.Right !== null;
 
-  if (handsLandmarks.length > 0) {
-    // 첫 번째 감지된 손의 랜드마크 사용 (멀티핸드 확장 가능)
-    const landmarks = handsLandmarks[0];
+  if (hasAnyHand) {
+    // 감지된 각 손의 랜드마크를 디버그 시각화
+    if (handsMap.Left) drawLandmarks(ctxSkel, handsMap.Left);
+    if (handsMap.Right) drawLandmarks(ctxSkel, handsMap.Right);
 
-    // 디버그: 랜드마크 점 시각화
-    drawLandmarks(ctxSkel, landmarks);
+    // 126차원 정규화 벡터 생성: [왼손 63 | 오른손 63]
+    // 감지되지 않은 손은 0으로 패딩 (unknown 클래스가 처리)
+    const vector = HandTracker.normalizeBothHands(handsMap);
 
-    // 63차원 정규화 벡터 생성
-    const vector = HandTracker.normalizeLandmarks(landmarks);
+    // 감지된 손 개수 (GestureRecognizer의 손 개수 검증에 사용)
+    const handCount = (handsMap.Left !== null ? 1 : 0) + (handsMap.Right !== null ? 1 : 0);
 
     // ── 제스처 추론 (동기) ──
     if (model.isLoaded) {
       const inferResult = model.inferSync(vector);
-      recognizer.update(inferResult);
+      // handCount를 함께 전달해 클래스별 손 개수 조건 검증
+      recognizer.update(inferResult, handCount);
 
       // HUD: 현재 진행 상황 업데이트
       updateProgressHUD(inferResult);
     }
   } else {
-    // 손이 감지되지 않으면 인식기에 알려 스트릭 초기화 및 효과 종료 처리
+    // 손이 전혀 감지되지 않으면 인식기에 알려 스트릭 초기화 및 효과 종료 처리
     recognizer.handleNoHand();
+  }
+
+  // ── 영역전개 효과 렌더 (활성 효과가 있을 때만 실행) ──
+  effectManager.draw(timestamp);
+
+  // ── 사람 누끼 렌더 (canvas-person, z-index:3 — 효과 위에 표시) ──
+  // 영역전개 효과가 활성화된 경우에만 누끼를 그린다.
+  // 효과가 없을 때는 canvas-person을 클리어해 사람 이미지를 숨긴다.
+  if (effectManager.activeKey) {
+    personSegmenter.drawPerson(videoEl, ctxPerson, timestamp);
+  } else {
+    ctxPerson.clearRect(0, 0, canvasPerson.width, canvasPerson.height);
   }
 
   requestAnimationFrame(renderLoop);
@@ -167,7 +218,7 @@ function drawLandmarks(ctx, landmarks) {
   const w = canvasSkel.width;
   const h = canvasSkel.height;
 
-  ctx.fillStyle = 'rgba(0, 255, 128, 0.8)';
+  ctx.fillStyle = "rgba(0, 255, 128, 0.8)";
   for (const lm of landmarks) {
     // MediaPipe 좌표는 0~1로 정규화됨 → 캔버스 픽셀로 변환
     // video는 scaleX(-1) 미러이므로 x축 반전
@@ -204,33 +255,50 @@ function updateProgressHUD(inferResult) {
 
 async function init() {
   try {
-    // HandTracker (MediaPipe) 초기화
-    loadingText.textContent = 'MediaPipe 모델 로드 중...';
+    // HandTracker (MediaPipe HandLandmarker) 초기화
+    loadingText.textContent = "MediaPipe 손 감지 모델 로드 중...";
     await tracker.init();
 
-    // TF.js 모델 로드
-    loadingText.textContent = 'TF.js 제스처 모델 로드 중...';
+    // TF.js 제스처 분류 모델 로드
+    loadingText.textContent = "TF.js 제스처 모델 로드 중...";
     await model.load();
+
+    // PersonSegmenter (MediaPipe ImageSegmenter — selfie segmentation) 초기화
+    loadingText.textContent = "누끼 세그멘테이션 모델 로드 중...";
+    await personSegmenter.init();
 
     // 웹캠 스트림 시작
     await startCamera();
 
-    // 캔버스 크기 설정
+    // 캔버스 크기 설정 (비디오 해상도 기준)
     resizeCanvases();
-    window.addEventListener('resize', resizeCanvases);
+    window.addEventListener("resize", resizeCanvases);
 
     // 로딩 화면 숨김
-    loadingEl.style.display = 'none';
+    loadingEl.style.display = "none";
 
     // 메인 루프 시작
-    console.log('[main] 앱 시작 — 렌더 루프 실행 중');
+    console.log("[main] 앱 시작 — 렌더 루프 실행 중");
     requestAnimationFrame(renderLoop);
-
   } catch (err) {
     loadingText.textContent = `오류: ${err.message}`;
-    console.error('[main] 초기화 실패:', err);
+    console.error("[main] 초기화 실패:", err);
   }
 }
 
 // DOM 로드 완료 후 초기화 실행
 init();
+
+// ──────────────────────────────────────────────
+// 테스트용 키보드 단축키
+//   1 → 고죠 (무량공처)
+//   2 → 료멘 (맹독한 사당)
+//   3 → 메구미 (嵌합암영정)
+//   0 → 효과 초기화
+// ──────────────────────────────────────────────
+window.addEventListener("keydown", (e) => {
+  if (e.key === "1") effectManager.trigger("gojo");
+  else if (e.key === "2") effectManager.trigger("ryomen");
+  else if (e.key === "3") effectManager.trigger("megumi");
+  else if (e.key === "0") effectManager.reset();
+});

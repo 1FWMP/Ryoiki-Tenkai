@@ -4,16 +4,26 @@ collect_data.py
 웹캠으로 클래스별 손동작 데이터를 수집하는 스크립트.
 mediapipe 0.10.14+ 의 새 Tasks API(HandLandmarker) 사용.
 
+[변경] v2 — 양손 126차원 + unknown 클래스
+  - 양손 랜드마크를 handedness 기준으로 [Left 63차원 | Right 63차원]으로 저장.
+  - 한 손이 감지되지 않으면 해당 63차원을 0으로 패딩.
+  - unknown 클래스 추가: 제스처에 해당하지 않는 일반 손 자세 수집.
+
 사용법:
     python scripts/collect_data.py
 
 키 조작:
-    1~3       : 클래스 전환 (gojo / ryomen / megumi)
+    1 : gojo
+    2 : ryomen
+    3 : megumi
+    4 : unknown (아무 손 자세나)
     스페이스바 : 수집 시작 / 중지
     q          : 종료
 
 출력:
     model/data/landmarks/{클래스명}.csv
+    CSV 컬럼: lx0,ly0,lz0,...,lx20,ly20,lz20 (왼손 63) +
+              rx0,ry0,rz0,...,rx20,ry20,rz20 (오른손 63) + label
 """
 
 import csv
@@ -30,7 +40,8 @@ from mediapipe.tasks.python import vision as mp_vision
 # 설정 상수
 # ──────────────────────────────────────────────
 
-CLASSES = ['gojo', 'ryomen', 'megumi']
+# unknown 클래스 추가: 아무 포즈에도 해당하지 않음을 학습시키기 위한 더미 클래스
+CLASSES = ['gojo', 'ryomen', 'megumi', 'unknown']
 
 BASE_DIR       = os.path.dirname(__file__)
 LANDMARKS_DIR  = os.path.join(BASE_DIR, '..', 'data', 'landmarks')
@@ -45,11 +56,25 @@ HAND_MODEL_URL  = (
     'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'
 )
 
-DETECTION_CONFIDENCE = 0.7
-TRACKING_CONFIDENCE  = 0.5
+# 임계값을 낮춰 측면 손·양손 등 어려운 각도에서도 감지율을 높인다.
+# 너무 낮추면 오감지가 증가하므로 0.4~0.5 범위를 권장.
+DETECTION_CONFIDENCE  = 0.5
+PRESENCE_CONFIDENCE   = 0.4   # 손이 프레임에 존재하는지 판단 임계값
+TRACKING_CONFIDENCE   = 0.4
 
 # 스페이스바를 누른 뒤 실제 수집 시작까지의 준비 시간 (초)
 COUNTDOWN_SEC = 2
+
+# 클래스별 필요 손 개수
+#   1 = 한 손만 (고죠: 한 손 제스처)
+#   2 = 양손 필수 (료멘·메구미: 양손 제스처)
+#   0 = 제한 없음 (unknown: 어떤 상황이든 수집)
+CLASS_HAND_COUNT = {
+    'gojo':    1,
+    'ryomen':  2,
+    'megumi':  2,
+    'unknown': 0,
+}
 
 # ──────────────────────────────────────────────
 # 모델 파일 다운로드 (없을 경우에만)
@@ -78,10 +103,11 @@ HAND_CONNECTIONS = [
     (5,9),(9,13),(13,17),          # 손바닥 가로 연결
 ]
 
-def draw_hand(frame, landmarks_list, img_w, img_h):
+def draw_hand(frame, landmarks_list, img_w, img_h, color=(0, 200, 100)):
     """
     손 랜드마크와 스켈레톤 선을 프레임에 직접 그린다.
     landmarks_list: mediapipe NormalizedLandmark 목록 (21개)
+    color: 스켈레톤 색상 (왼손/오른손 구분용)
     """
     # 픽셀 좌표로 변환 (정규화 좌표 0~1 → 픽셀)
     points = [
@@ -91,13 +117,32 @@ def draw_hand(frame, landmarks_list, img_w, img_h):
 
     # 연결선 그리기
     for start_idx, end_idx in HAND_CONNECTIONS:
-        cv2.line(frame, points[start_idx], points[end_idx],
-                 (0, 200, 100), 2)
+        cv2.line(frame, points[start_idx], points[end_idx], color, 2)
 
     # 랜드마크 점 그리기
     for px, py in points:
-        cv2.circle(frame, (px, py), 5, (0, 255, 128), -1)
+        cv2.circle(frame, (px, py), 5, color, -1)
         cv2.circle(frame, (px, py), 5, (255, 255, 255), 1)  # 흰 테두리
+
+# ──────────────────────────────────────────────
+# 랜드마크 정규화: 손목 기준 상대 좌표 63차원
+# ──────────────────────────────────────────────
+
+def normalize_landmarks(hand_lms):
+    """
+    손목(landmark[0])을 원점으로 삼아 21개 랜드마크의 상대 좌표를
+    63차원 float 리스트로 반환한다.
+    JS의 HandTracker.normalizeLandmarks()와 동일한 방식.
+    """
+    wrist = hand_lms[0]
+    coords = []
+    for lm in hand_lms:
+        coords += [
+            round(lm.x - wrist.x, 6),
+            round(lm.y - wrist.y, 6),
+            round(lm.z - wrist.z, 6),
+        ]
+    return coords  # 길이 63
 
 # ──────────────────────────────────────────────
 # 메인
@@ -108,6 +153,8 @@ def main():
     os.makedirs(LANDMARKS_DIR, exist_ok=True)
 
     # ── CSV 파일 핸들러 준비 ──
+    # 컬럼 구조: lx0,ly0,lz0,...,lx20,ly20,lz20 (왼손 63) +
+    #           rx0,ry0,rz0,...,rx20,ry20,rz20 (오른손 63) + label
     csv_files   = {}
     csv_writers = {}
     for cls in CLASSES:
@@ -116,109 +163,173 @@ def main():
         f      = open(filepath, 'a', newline='', encoding='utf-8')
         writer = csv.writer(f)
         if not file_exists:
+            # 126차원 헤더 생성
             header = []
             for i in range(21):
-                header += [f'x{i}', f'y{i}', f'z{i}']
+                header += [f'lx{i}', f'ly{i}', f'lz{i}']  # 왼손
+            for i in range(21):
+                header += [f'rx{i}', f'ry{i}', f'rz{i}']  # 오른손
             header.append('label')
             writer.writerow(header)
         csv_files[cls]   = f
         csv_writers[cls] = writer
 
-    # ── HandLandmarker 초기화 (IMAGE 모드: 프레임 단위 처리) ──
+    # ── HandLandmarker 초기화 (VIDEO 모드: 타임스탬프 기반 시계열 추적) ──
+    # IMAGE 모드는 매 프레임을 독립 처리해 시간적 연속성이 없다.
+    # VIDEO 모드는 이전 프레임 정보를 누적해 양손·측면 등 어려운 각도의
+    # 감지율과 추적 안정성이 크게 향상된다.
     base_options = mp_tasks.BaseOptions(model_asset_path=HAND_MODEL_PATH)
     options = mp_vision.HandLandmarkerOptions(
         base_options=base_options,
-        running_mode=mp_vision.RunningMode.IMAGE,
-        num_hands=2,
+        running_mode=mp_vision.RunningMode.VIDEO,       # IMAGE → VIDEO로 변경
+        num_hands=2,                                    # 양손 감지
         min_hand_detection_confidence=DETECTION_CONFIDENCE,
-        min_hand_presence_confidence=0.5,
+        min_hand_presence_confidence=PRESENCE_CONFIDENCE,
         min_tracking_confidence=TRACKING_CONFIDENCE,
     )
     landmarker = mp_vision.HandLandmarker.create_from_options(options)
 
+    # VIDEO 모드에서 필요한 단조 증가 타임스탬프 (밀리초)
+    frame_timestamp_ms = 0
+
     # ── 상태 변수 ──
     current_class_idx = 0
     collecting        = False
-    # 카운트다운 시작 시각 (None이면 카운트다운 비활성)
-    countdown_start   = None
+    countdown_start   = None   # 카운트다운 시작 시각 (None이면 비활성)
     collected_counts  = {cls: 0 for cls in CLASSES}
 
     cap = cv2.VideoCapture(0)
-    print("=== 손동작 데이터 수집 도구 ===")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)  # 너비 1280으로 증가
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)  # 높이 720으로 증가
+    print("=== 손동작 데이터 수집 도구 (양손 126차원) ===")
     print(f"클래스 전환 : 1~{len(CLASSES)} 키  ({', '.join(CLASSES)})")
     print("수집 시작/중지 : 스페이스바")
-    print("종료 : q\n")
+    print("종료 : q")
+    print("─" * 40)
+    print("※ 클래스별 손 개수 규칙:")
+    print("   gojo   (1): 한 손만 보이게 하세요.")
+    print("   ryomen (2): 양손이 모두 보여야 저장됩니다.")
+    print("   megumi (2): 양손이 모두 보여야 저장됩니다.")
+    print("   unknown(0): 손 개수 제한 없음. 다양한 자세를 섞어 수집하세요.")
+    print("─" * 40 + "\n")
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        # 좌우 반전 (거울 모드)
-        frame    = cv2.flip(frame, 1)
         img_h, img_w = frame.shape[:2]
 
         # BGR → RGB 변환 후 MediaPipe 이미지로 래핑
+        # [주의] 원본(반전 전) 프레임을 MediaPipe에 전달해야 handedness가 정확하다.
+        # 이미지를 먼저 flip하면 손의 엄지 방향도 반전되어 MediaPipe가
+        # 해부학적으로 반대 손으로 판별한다. (물리적 오른손 → "Left" 오판별)
+        # JS HandTracker.js 역시 raw 비디오를 그대로 MediaPipe에 전달하므로
+        # 여기서도 동일하게 원본 프레임을 사용해 Left/Right 슬롯을 일치시킨다.
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
-        # 손 랜드마크 감지
-        result = landmarker.detect(mp_image)
+        # VIDEO 모드: detect_for_video()에 단조 증가 타임스탬프를 전달해야 한다.
+        # time.time() 대신 증분 카운터를 사용하면 시스템 시간 역전 문제를 방지한다.
+        frame_timestamp_ms += 33          # ~30fps 기준 약 33ms 증분
+        result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
 
         # ── 카운트다운 경과 확인: COUNTDOWN_SEC 이 지나면 수집 시작 ──
         if countdown_start is not None and not collecting:
             elapsed = time.time() - countdown_start
             if elapsed >= COUNTDOWN_SEC:
-                # 카운트다운 완료 → 수집 전환
                 collecting      = True
                 countdown_start = None
                 print(f"[{CLASSES[current_class_idx]}] 수집 시작")
 
-        # ── 감지된 손 처리 ──
-        if result.hand_landmarks:
-            for hand_lms in result.hand_landmarks:
-                # 스켈레톤 시각화
-                draw_hand(frame, hand_lms, img_w, img_h)
+        # ── 양손 랜드마크를 handedness 기준으로 분류 ──
+        # 원본(반전 전) 프레임을 사용했으므로 MediaPipe handedness가 실제 손과 일치한다.
+        # 물리적 왼손 → "Left"(0~62), 물리적 오른손 → "Right"(63~125).
+        # JS HandTracker.normalizeBothHands()와 동일한 [Left 63 | Right 63] 슬롯 구조.
+        # 감지되지 않은 손은 0으로 패딩 (모델이 이 케이스도 학습해야 함).
+        left_coords  = [0.0] * 63  # 왼손 미감지 시 패딩
+        right_coords = [0.0] * 63  # 오른손 미감지 시 패딩
 
-                # 수집 모드일 때 CSV 저장
-                if collecting:
-                    # 손목(landmark[0]) 기준 상대 좌표로 정규화
-                    wrist = hand_lms[0]
-                    row   = []
-                    for lm in hand_lms:
-                        row += [
-                            round(lm.x - wrist.x, 6),
-                            round(lm.y - wrist.y, 6),
-                            round(lm.z - wrist.z, 6),
-                        ]
-                    row.append(CLASSES[current_class_idx])
-                    csv_writers[CLASSES[current_class_idx]].writerow(row)
-                    csv_files[CLASSES[current_class_idx]].flush()
-                    collected_counts[CLASSES[current_class_idx]] += 1
+        if result.hand_landmarks:
+            for hand_lms, handedness_list in zip(result.hand_landmarks, result.handedness):
+                # handedness_list[0].category_name: "Left" 또는 "Right"
+                side   = handedness_list[0].category_name
+                coords = normalize_landmarks(hand_lms)
+
+                # 왼손/오른손 색상 구분 (시각화)
+                color = (255, 100, 0) if side == 'Left' else (0, 100, 255)
+                draw_hand(frame, hand_lms, img_w, img_h, color=color)
+
+                if side == 'Left':
+                    left_coords = coords
+                else:
+                    right_coords = coords
+
+        # ── 현재 감지된 손 개수 계산 ──
+        detected_hand_count = (
+            (1 if any(v != 0.0 for v in left_coords)  else 0) +
+            (1 if any(v != 0.0 for v in right_coords) else 0)
+        )
+
+        # ── 클래스별 손 개수 검증 ──
+        # required == 0 이면 제한 없음 (unknown 등)
+        cls_name     = CLASSES[current_class_idx]
+        required     = CLASS_HAND_COUNT[cls_name]
+        hand_ok      = (required == 0) or (detected_hand_count == required)
+
+        # ── 수집 모드일 때 CSV 저장 (손 개수가 맞을 때만) ──
+        if collecting and hand_ok:
+            # 126차원 = [왼손 63 | 오른손 63] + 레이블
+            row = left_coords + right_coords + [cls_name]
+            csv_writers[cls_name].writerow(row)
+            csv_files[cls_name].flush()
+            collected_counts[cls_name] += 1
+
+        # ── 표시용 거울 반전 (원본 프레임에 스켈레톤을 그린 뒤 flip) ──
+        # 원본 프레임에 랜드마크를 그리고 나서 flip하면 스켈레톤 좌표도
+        # 자연스럽게 거울 모드에 맞게 반전되어 표시된다.
+        frame = cv2.flip(frame, 1)
 
         # ── HUD 렌더링 ──
         current_class = CLASSES[current_class_idx]
 
         if collecting:
-            # 수집 중: 초록색
-            color       = (0, 255, 0)
+            color_hud   = (0, 255, 0)
             status_text = "● 수집 중..."
         elif countdown_start is not None:
-            # 카운트다운 중: 남은 시간을 계산해 주황색으로 표시
             remaining   = COUNTDOWN_SEC - (time.time() - countdown_start)
-            color       = (0, 165, 255)
+            color_hud   = (0, 165, 255)
             status_text = f"준비 중... {remaining:.1f}초"
         else:
-            # 대기 중: 빨간색
-            color       = (0, 80, 255)
+            color_hud   = (0, 80, 255)
             status_text = "■ 대기 (Space: 시작)"
 
         cv2.putText(frame, f"Class : {current_class}", (10, 38),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, color_hud, 2)
         cv2.putText(frame, status_text, (10, 78),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.75, color_hud, 2)
         cv2.putText(frame, f"Count : {collected_counts[current_class]}", (10, 118),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 220, 0), 2)
+
+        # 손 감지 상태 표시 + 손 개수 검증 결과
+        left_status  = "L:O" if any(v != 0.0 for v in left_coords)  else "L:X"
+        right_status = "R:O" if any(v != 0.0 for v in right_coords) else "R:X"
+
+        if required == 0:
+            # unknown: 제한 없음
+            hand_guide = f"{left_status} {right_status} (제한없음)"
+            hand_color = (200, 200, 200)
+        elif hand_ok:
+            # 손 개수 일치
+            hand_guide = f"{left_status} {right_status} (OK: {detected_hand_count}/{required}손)"
+            hand_color = (0, 255, 0)
+        else:
+            # 손 개수 불일치 → 저장 안 됨
+            hand_guide = f"{left_status} {right_status} ({detected_hand_count}/{required}손 필요)"
+            hand_color = (0, 60, 255)
+
+        cv2.putText(frame, hand_guide, (10, 148),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, hand_color, 1)
 
         # 좌측 하단에 전체 클래스 현황 표시
         for i, cls in enumerate(CLASSES):
@@ -235,18 +346,15 @@ def main():
             break
         elif key == ord(' '):
             if collecting:
-                # 수집 중 → 즉시 중지
                 collecting = False
                 print(f"[{current_class}] 중지 → 누적 {collected_counts[current_class]}개")
             elif countdown_start is not None:
-                # 카운트다운 중 → 취소
                 countdown_start = None
                 print(f"[{current_class}] 카운트다운 취소")
             else:
-                # 대기 중 → 카운트다운 시작 (COUNTDOWN_SEC 후 수집 시작)
                 countdown_start = time.time()
                 print(f"[{current_class}] {COUNTDOWN_SEC}초 후 수집 시작...")
-        elif ord('1') <= key <= ord('3'):
+        elif ord('1') <= key <= ord('4'):
             new_idx = key - ord('1')
             if new_idx < len(CLASSES):
                 current_class_idx = new_idx

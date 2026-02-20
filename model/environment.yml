@@ -30,3 +30,4 @@ dependencies:
     - tensorflowjs>=4.10.0
     # 웹캠 영상 처리 (pip 전용)
     - opencv-python>=4.8.0
+    - packaging
