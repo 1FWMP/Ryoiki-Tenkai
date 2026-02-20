@@ -1,5 +1,7 @@
 # Ryoiki-Tenkai
 
+**배포 URL**: https://ryoiki-tenkai-sigma.vercel.app
+
 주술회전(Jujutsu Kaisen) 캐릭터별 영역전개 손동작을 실시간으로 인식하는 웹 애플리케이션이다.
 웹캠 영상에서 **양손** 랜드마크를 추출하고, 학습된 MLP 모델로 제스처를 판별해 브라우저 위에 시각 효과를 출력한다.
 
@@ -341,10 +343,12 @@ GestureRecognizer는 추론 결과와 함께 현재 프레임의 감지된 손 �
 ### Canvas 레이어 구조
 
 ```
-Layer 0: <video>          -- 웹캠 영상 (거울 모드)
-Layer 1: canvas-skeleton  -- 손 랜드마크 스켈레톤 (디버그)
-Layer 2: canvas-effect    -- 영역전개 시각 효과
-Layer 3: #hud             -- 제스처명 + 신뢰도 오버레이
+Layer 0: <video>          -- 웹캠 영상 (거울 모드, z-index: -1, 숨김)
+Layer 1: canvas-effect    -- 영역전개 시각 효과 (z-index: 1)
+Layer 2: canvas-skeleton  -- 손 랜드마크 스켈레톤 (디버그, z-index: 2)
+Layer 3: canvas-person    -- 사람 누끼 (z-index: 3)
+Layer 4: canvas-text      -- 영역전개 텍스트 (사람 위)
+Layer 5: #hud             -- 제스처명 + 신뢰도 오버레이 (z-index: 10)
 ```
 
 ---
