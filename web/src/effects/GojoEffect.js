@@ -40,37 +40,35 @@ export class GojoEffect {
   // ── 초기화 ──────────────────────────────────────
 
   /**
-   * 방사형 광선 60개를 초기화한다.
+   * 방사형 광선 100개를 초기화한다.
    * 각 광선은 각도, 너비, 색상, 속도, 길이가 다르다.
    */
   _initBeams() {
-    const count = 60;
+    const count = 100;
     this.beams = Array.from({ length: count }, (_, i) => {
-      // 불균일한 각도 배분 — 자연스러운 군집
       const baseAngle = (i / count) * Math.PI * 2;
       const jitter = (Math.random() - 0.5) * ((Math.PI * 2) / count) * 1.8;
 
-      // 색상: 흰색, 밝은 분홍, 연보라, 자홍
+      // 이미지 기반 색상 팔레트: 순백, 강렬한 붉은색, 짙은 푸른색, 마젠타/자홍, 밝은 보라
       const palette = [
-        [255, 255, 255], // 순백
-        [255, 180, 230], // 밝은 분홍
-        [240, 140, 255], // 연보라
-        [255, 100, 200], // 자홍
-        [200, 160, 255], // 라벤더
+        [255, 255, 255], // 순백 (가장 밝은 코어)
+        [240, 30, 60], // 강렬한 붉은색 (Red)
+        [40, 40, 220], // 짙은 푸른색 (Deep Blue)
+        [220, 60, 200], // 마젠타/자홍 (Magenta)
+        [170, 100, 240], // 밝은 라벤더/보라 (Light Violet)
       ];
       const col = palette[Math.floor(Math.random() * palette.length)];
 
       return {
         angle: baseAngle + jitter,
-        width: Math.random() * 4 + 1, // 1 ~ 5 px
-        length: 0, // 현재 렌더 길이
+        width: Math.random() * 4 + 1,
+        length: 0,
         maxLen: Math.max(this.width, this.height) * (1.1 + Math.random() * 0.4),
-        speed: 18 + Math.random() * 28, // px/frame
+        speed: 200 + Math.random() * 40,
         opacity: 0.55 + Math.random() * 0.45,
         color: col,
-        delay: Math.floor(Math.random() * 12), // frame 지연
+        delay: Math.floor(Math.random() * 12),
         frame: 0,
-        // 이중 레이어 — 코어 광선 + 외곽 글로우
         glowW: Math.random() * 14 + 6,
       };
     });
@@ -133,22 +131,29 @@ export class GojoEffect {
     const cx = w / 2;
     const cy = h / 2;
 
-    // ─ 1. 배경 오버레이 (반투명 — 카메라 영상이 비쳐 보이도록) ─
-    ctx.fillStyle = "rgba(5, 0, 12, 0.38)";
+    // ─ 1. 배경 오버레이 (기존과 동일) ─
+    ctx.fillStyle = "rgba(5, 0, 12, 1)";
     ctx.fillRect(0, 0, w, h);
 
-    // ─ 2. 광선 렌더 ─
+    // ─ 2. 광선 렌더 (회전·일렁임 없이 빠르고 날카로운 직선 방사) ─
     for (const beam of this.beams) {
       beam.frame++;
       if (beam.frame < beam.delay) continue;
 
-      beam.length = Math.min(beam.length + beam.speed, beam.maxLen);
+      // 매 프레임 speed만큼 길이를 늘려 광선이 중심에서 외곽으로 뻗어나가게 한다
+      beam.length += beam.speed;
+
+      // 화면 끝에 도달하면 길이를 리셋하고 황금각(≈137.5°)을 더해 각도를 변경한다.
+      // 황금각 분할로 연속 루프마다 광선이 겹치지 않는 새로운 방향에서 재발사된다.
+      if (beam.length >= beam.maxLen) {
+        beam.length = 0;
+        beam.angle += 2.39996;
+      }
 
       const ex = cx + Math.cos(beam.angle) * beam.length;
       const ey = cy + Math.sin(beam.angle) * beam.length;
 
       const progress = beam.length / beam.maxLen;
-      // 광선 초반엔 강하고 멀어질수록 점점 옅어짐
       const alpha = beam.opacity * (1 - progress * 0.6);
 
       // 외곽 글로우 레이어
@@ -167,7 +172,7 @@ export class GojoEffect {
       ctx.lineTo(ex, ey);
       ctx.stroke();
 
-      // 코어 광선 (얇고 밝은 흰색)
+      // 코어 광선
       const coreGrad = ctx.createLinearGradient(cx, cy, ex, ey);
       coreGrad.addColorStop(0, `rgba(255, 255, 255, ${alpha})`);
       coreGrad.addColorStop(0.2, `rgba(${beam.color.join(",")}, ${alpha * 0.7})`);
@@ -272,7 +277,6 @@ export class GojoEffect {
     ctx.arc(cx, cy, glowPulse * 0.4, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-
   }
 
   /**

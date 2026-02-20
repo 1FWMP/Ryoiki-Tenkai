@@ -101,6 +101,35 @@ export class PersonSegmenter {
   // ──────────────────────────────────────────────
 
   /**
+   * CSS object-fit:cover 와 동일한 소스 크롭 파라미터를 계산한다.
+   * 캔버스(this._w × this._h)를 채우기 위해 비디오 프레임에서
+   * 잘라낼 영역(sx, sy, sw, sh)과 원본 비디오 해상도(vw, vh)를 반환한다.
+   *
+   * @param {HTMLVideoElement} videoEl
+   * @returns {{ sx:number, sy:number, sw:number, sh:number, vw:number, vh:number }}
+   */
+  _computeCoverCrop(videoEl) {
+    const vw = videoEl.videoWidth  || this._w;
+    const vh = videoEl.videoHeight || this._h;
+    const canvasAspect = this._w / this._h;
+    const videoAspect  = vw / vh;
+
+    let sx = 0, sy = 0, sw = vw, sh = vh;
+
+    if (canvasAspect > videoAspect) {
+      // 캔버스가 더 넓음 → 비디오 너비 기준으로 맞추고 세로 크롭
+      sh = vw / canvasAspect;
+      sy = (vh - sh) / 2;
+    } else if (canvasAspect < videoAspect) {
+      // 캔버스가 더 높음 → 비디오 높이 기준으로 맞추고 가로 크롭
+      sw = vh * canvasAspect;
+      sx = (vw - sw) / 2;
+    }
+
+    return { sx, sy, sw, sh, vw, vh };
+  }
+
+  /**
    * 세그멘테이션 없이 거울 반전 비디오를 ctx에 직접 그린다.
    * 세그멘터 초기화 실패 또는 런타임 오류 시 호출된다.
    *
@@ -108,10 +137,12 @@ export class PersonSegmenter {
    * @param {HTMLVideoElement} videoEl
    */
   _drawMirroredVideo(ctx, videoEl) {
+    const { sx, sy, sw, sh } = this._computeCoverCrop(videoEl);
     ctx.save();
     ctx.translate(this._w, 0);
     ctx.scale(-1, 1);
-    ctx.drawImage(videoEl, 0, 0, this._w, this._h);
+    // object-fit:cover 와 동일하게 크롭된 영역을 캔버스 전체에 그림
+    ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, this._w, this._h);
     ctx.restore();
   }
 
@@ -157,6 +188,11 @@ export class PersonSegmenter {
       // Uint8Array로 마스크 추출 (카테고리 인덱스: 0=배경, 1=사람)
       const categoryMask = result.categoryMask.getAsUint8Array();
 
+      // ── object-fit:cover 크롭 파라미터 계산 ──
+      // 캔버스 픽셀 크기는 뷰포트와 같고, 비디오는 이 영역을 cover로 채운다.
+      // 동일한 크롭을 오프스크린 드로잉과 마스크 좌표 역산에 공통으로 사용한다.
+      const { sx, sy, sw, sh, vw, vh } = this._computeCoverCrop(videoEl);
+
       // ── 진단: 첫 프레임에서 마스크 크기 로그 ──
       if (!this._diagDone) {
         this._diagDone = true;
@@ -164,8 +200,8 @@ export class PersonSegmenter {
         console.log(
           `[PersonSegmenter] 첫 프레임 진단 — ` +
           `마스크 길이: ${maskLen}, ` +
-          `캔버스: ${this._w}×${this._h} (예상: ${this._w * this._h}), ` +
-          `일치: ${maskLen === this._w * this._h}`
+          `비디오: ${vw}×${vh} (예상: ${vw * vh}), ` +
+          `일치: ${maskLen === vw * vh}`
         );
         // 마스크 값 샘플 (중앙 픽셀 근처 5개)
         const mid = Math.floor(maskLen / 2);
@@ -173,33 +209,34 @@ export class PersonSegmenter {
       }
 
       // ── 마스크 크기 결정 ──
-      // 마스크 길이가 _w×_h와 다를 경우 → 모델 출력 해상도로 보정
+      // 마스크는 비디오 원본 해상도 기준이므로 vw×vh 와 비교해 추정한다.
+      // (캔버스 픽셀 크기는 뷰포트이므로 this._w×this._h 와 비교하면 항상 불일치)
       const maskTotal = categoryMask.length;
-      let maskW = this._w;
-      let maskH = this._h;
+      let maskW = vw;
+      let maskH = vh;
 
-      if (maskTotal !== this._w * this._h) {
-        // 비율 유지하면서 마스크 해상도 추정 (일반적으로 정사각형 또는 비율 유지)
-        // 가장 안전한 방법: 비디오 비율로 분해
-        const ratio = this._w / this._h;
-        maskH = Math.round(Math.sqrt(maskTotal / ratio));
-        maskW = Math.round(maskH * ratio);
+      if (maskTotal !== vw * vh) {
+        // 마스크가 비디오보다 낮은 해상도 → 비디오 비율로 추정
+        const videoRatio = vw / vh;
+        maskH = Math.round(Math.sqrt(maskTotal / videoRatio));
+        maskW = Math.round(maskH * videoRatio);
         if (!this._maskWarnDone) {
           this._maskWarnDone = true;
           console.warn(
             `[PersonSegmenter] 마스크 크기 불일치 — ` +
-            `예상: ${this._w}×${this._h}, ` +
+            `비디오: ${vw}×${vh}, ` +
             `추정 실제: ${maskW}×${maskH}`
           );
         }
       }
 
-      // ── 2. 오프스크린 캔버스에 거울 반전 비디오 그리기 ──
+      // ── 2. 오프스크린 캔버스에 object-fit:cover 방식으로 거울 반전 비디오 그리기 ──
+      // 비디오 소스의 (sx, sy, sw, sh) 크롭 영역만 캔버스 전체에 확대해 그린다.
+      // 이렇게 하면 CSS object-fit:cover 와 동일한 화면 영역이 오프스크린에 표시된다.
       this._offCtx.save();
-      // canvas 오른쪽 끝을 원점으로 이동 후 x축 반전 → 거울 효과
       this._offCtx.translate(this._w, 0);
       this._offCtx.scale(-1, 1);
-      this._offCtx.drawImage(videoEl, 0, 0, this._w, this._h);
+      this._offCtx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, this._w, this._h);
       this._offCtx.restore();
 
       // ── 3. 픽셀별 alpha 마스킹 ──
@@ -209,17 +246,18 @@ export class PersonSegmenter {
 
       for (let y = 0; y < this._h; y++) {
         for (let x = 0; x < this._w; x++) {
-          // 마스크 좌표: 캔버스 해상도 → 마스크 해상도로 스케일
-          const mx = Math.floor((x / this._w) * maskW);
-          const my = Math.floor((y / this._h) * maskH);
+          // 캔버스 픽셀 (x, y) → 원본 비디오 좌표 역산
+          // 오프스크린은 scaleX(-1) 거울 반전이므로 x 를 반전(this._w - x)해서
+          // cover 크롭 오프셋(sx, sy)과 스케일(sw/this._w, sh/this._h)을 더한다.
+          const videoX = sx + ((this._w - x) / this._w) * sw;
+          const videoY = sy + (y / this._h) * sh;
 
-          // categoryMask는 비반전(원본) 좌표계 → x를 반전해서 읽음
-          // (오프스크린에는 거울 반전 영상이 있으므로 마스크도 맞춰야 함)
-          const maskX   = maskW - 1 - mx;
-          const maskIdx = my * maskW + maskX;
+          // 원본 비디오 좌표 → 마스크 좌표 (경계값 클램프)
+          const mx = Math.min(Math.floor((videoX / vw) * maskW), maskW - 1);
+          const my = Math.min(Math.floor((videoY / vh) * maskH), maskH - 1);
+          const maskIdx = my * maskW + mx;
 
           // getAsUint8Array() 반환값: 0 = 사람(foreground), 255 = 배경
-          // (selfie_segmenter는 카테고리 인덱스가 반전된 형태로 반환됨)
           const alpha = categoryMask[maskIdx] === 0 ? 255 : 0;
 
           // 픽셀 인덱스: RGBA 배열에서 A 채널은 오프셋 +3
